@@ -1,20 +1,67 @@
-import React, { useState } from 'react';
-import { StyleSheet, View, Text, TextInput, ScrollView, TouchableOpacity, Linking, Alert } from 'react-native';
+import React, { useState, useCallback } from 'react';
+import { StyleSheet, View, Text, TextInput, ScrollView, TouchableOpacity, Linking, Alert, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { db, auth } from '../firebase';
 
-const MeetingPlaceScreen = ({ navigation, route }) => {
-  const [place1Name, setPlace1Name] = useState(
-    route.params?.meetingPlace1Name || 'Meeting place #1'
-  );
-  const [place1Address, setPlace1Address] = useState(
-    route.params?.meetingPlace1Address || 'Central Park Oak Shelter'
-  );
+const MeetingPlaceScreen = ({ navigation }) => {
+  const [place1Name, setPlace1Name] = useState('Meeting place #1');
+  const [place1Address, setPlace1Address] = useState('');
+  const [place2Name, setPlace2Name] = useState('Meeting place #2');
+  const [place2Address, setPlace2Address] = useState('');
+  const [loading, setLoading] = useState(true);
 
-  const [place2Name, setPlace2Name] = useState(
-    route.params?.meetingPlace2Name || 'Meeting place #2'
-  );
-  const [place2Address, setPlace2Address] = useState(
-    route.params?.meetingPlace2Address || 'Community Center'
+  
+  const readMeetingPlan = async () => {
+    const userID = auth.currentUser?.uid;
+    if (!userID) {
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const docRef = doc(db, "emergencies", userID);
+      const docSnap = await getDoc(docRef);
+
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        console.log("Meeting Plan loaded from Firestore:", data);
+        setPlace1Name(data.place1Name || 'Meeting place #1');
+        setPlace1Address(data.place1Address || '');
+        setPlace2Name(data.place2Name || 'Meeting place #2');
+        setPlace2Address(data.place2Address || '');
+      } else {
+        
+        const defaultP1Name = 'Meeting place #1';
+        const defaultP1Address = 'Central Park Oak Shelter';
+        const defaultP2Name = 'Meeting place #2';
+        const defaultP2Address = 'Community Center';
+
+        setPlace1Name(defaultP1Name);
+        setPlace1Address(defaultP1Address);
+        setPlace2Name(defaultP2Name);
+        setPlace2Address(defaultP2Address);
+
+        await setDoc(docRef, {
+          place1Name: defaultP1Name,
+          place1Address: defaultP1Address,
+          place2Name: defaultP2Name,
+          place2Address: defaultP2Address,
+        }, { merge: true });
+      }
+    } catch (e) {
+      console.error("Error reading meeting plan: ", e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  
+  useFocusEffect(
+    useCallback(() => {
+      readMeetingPlan();
+    }, [])
   );
 
   const openGoogleMapsSearch = async (address, defaultSearch) => {
@@ -34,7 +81,27 @@ const MeetingPlaceScreen = ({ navigation, route }) => {
     }
   };
 
-  const handleSaveAndExit = () => {
+  
+  const handleSaveAndExit = async () => {
+    const userID = auth.currentUser?.uid;
+    if (userID) {
+      try {
+        await setDoc(
+          doc(db, 'emergencies', userID),
+          {
+            place1Name,
+            place1Address,
+            place2Name,
+            place2Address,
+          },
+          { merge: true }
+        );
+        console.log("Meeting Plan successfully updated in Firestore!");
+      } catch (error) {
+        console.error('Error saving meeting plan: ', error);
+      }
+    }
+
     navigation.navigate({
       name: 'Emergency Center',
       params: {
@@ -47,6 +114,15 @@ const MeetingPlaceScreen = ({ navigation, route }) => {
     });
   };
 
+  if (loading) {
+    return (
+      <View style={styles.centered}>
+        <ActivityIndicator size="large" color="#FF4500" />
+        <Text style={{ marginTop: 10, color: '#666' }}>Loading Meeting Plan...</Text>
+      </View>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
@@ -56,7 +132,7 @@ const MeetingPlaceScreen = ({ navigation, route }) => {
           <View style={styles.titleUnderline} />
         </View>
 
-        {/* Meeting Place #1 */}
+      
         <View style={styles.sectionBlock}>
           <TouchableOpacity
             activeOpacity={0.8}
@@ -92,7 +168,7 @@ const MeetingPlaceScreen = ({ navigation, route }) => {
           </View>
         </View>
 
-        {/* Meeting Place #2 */}
+       
         <View style={styles.sectionBlock}>
           <TouchableOpacity
             activeOpacity={0.8}
@@ -145,6 +221,7 @@ export default MeetingPlaceScreen;
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#EAEAEA' },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   scrollContent: { paddingHorizontal: 20, paddingVertical: 16, alignItems: 'center' },
   headerContainer: { alignItems: 'center', marginBottom: 20, width: '100%' },
   headerTitle: { fontSize: 24, color: '#4A4A4A', textAlign: 'center' },
