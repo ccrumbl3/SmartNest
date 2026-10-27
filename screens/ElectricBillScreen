@@ -1,0 +1,942 @@
+import React, { useState, useCallback, useMemo } from 'react';
+import {
+  View,
+  StyleSheet,
+  Text,
+  TextInput,
+  ScrollView,
+  TouchableOpacity,
+  ActivityIndicator,
+  Alert,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Button } from 'react-native-paper';
+import { useFocusEffect } from '@react-navigation/native';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { db, auth } from '../firebase';
+
+const MONTHS_PER_YEAR = 12;
+const WEEKS_PER_YEAR = 52;
+const WEEKS_PER_MONTH = WEEKS_PER_YEAR / MONTHS_PER_YEAR;
+
+const ElectricScreen = () => {
+  const userID = auth.currentUser?.uid;
+
+  const [loading, setLoading] = useState(true);
+
+  
+  const [startTime, setStartTime] = useState('15:00');
+  const [endTime, setEndTime] = useState('18:00');
+  const [powerKw, setPowerKw] = useState('1.5');
+  const [ratePerKwh, setRatePerKwh] = useState('0.22');
+  const [usesPerWeek, setUsesPerWeek] = useState('7');
+
+  
+  const [calculatedResult, setCalculatedResult] = useState(null);
+  const [isDirty, setIsDirty] = useState(false);
+
+  
+  const [loggedAppliances, setLoggedAppliances] = useState([]);
+
+  
+  const handleInputChange = (setter) => (value) => {
+    setter(value);
+    setIsDirty(true);
+  };
+
+  
+  const fetchElectricData = async () => {
+    if (!userID) {
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const docRef = doc(db, 'electricity', userID);
+      const docSnap = await getDoc(docRef);
+
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setLoggedAppliances(data.loggedAppliances || []);
+        if (data.ratePerKwh) {
+          setRatePerKwh(data.ratePerKwh.toString());
+        }
+      } else {
+        await setDoc(
+          docRef,
+          {
+            ratePerKwh: 0.22,
+            loggedAppliances: [],
+            totalKwh: 0,
+          },
+          { merge: true }
+        );
+      }
+    } catch (error) {
+      console.error('Error loading electricity data:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchElectricData();
+    }, [userID])
+  );
+
+  
+  const parseFlexibleDuration = (start, end) => {
+    const timeRegex = /^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$/;
+
+    const trimmedStart = (start || '').trim();
+    const trimmedEnd = (end || '').trim();
+
+    
+    if (timeRegex.test(trimmedStart) && timeRegex.test(trimmedEnd)) {
+      const [startH, startM] = trimmedStart.split(':').map(Number);
+      const [endH, endM] = trimmedEnd.split(':').map(Number);
+
+      const startMinutes = startH * 60 + startM;
+      const endMinutes = endH * 60 + endM;
+
+      let diffMinutes = endMinutes - startMinutes;
+      if (diffMinutes < 0) {
+        diffMinutes += 24 * 60; 
+      }
+      return diffMinutes / 60;
+    }
+
+    
+    const directStart = parseFloat(trimmedStart);
+    const directEnd = parseFloat(trimmedEnd);
+    if (!isNaN(directStart) && !isNaN(directEnd) && directEnd > directStart) {
+      return directEnd - directStart;
+    }
+
+    return null;
+  };
+
+  
+  const handleCalculate = () => {
+    const duration = parseFlexibleDuration(startTime, endTime);
+    if (duration === null || duration <= 0) {
+      Alert.alert(
+        'Invalid Times',
+        'Please enter valid times (e.g. 08:30 or 15:00) where the end time is after the start time.'
+      );
+      return;
+    }
+
+    const kw = parseFloat(powerKw);
+    if (isNaN(kw) || kw <= 0) {
+      Alert.alert('Invalid Power', 'Enter appliance power in kW (e.g. 1.5).');
+      return;
+    }
+
+    const rate = parseFloat(ratePerKwh);
+    if (isNaN(rate) || rate <= 0) {
+      Alert.alert('Invalid Rate', 'Enter electricity rate per kWh (e.g. 0.22).');
+      return;
+    }
+
+    const frequency = parseFloat(usesPerWeek);
+    if (isNaN(frequency) || frequency <= 0) {
+      Alert.alert('Invalid Frequency', 'Enter how many times per week this device is used.');
+      return;
+    }
+
+    
+    const sessionKwh = kw * duration;
+    const sessionCost = sessionKwh * rate;
+
+    const weeklyKwh = sessionKwh * frequency;
+    const weeklyCost = sessionCost * frequency;
+
+    const monthlyKwh = weeklyKwh * WEEKS_PER_MONTH;
+    const monthlyCost = weeklyCost * WEEKS_PER_MONTH;
+
+    const yearlyKwh = weeklyKwh * WEEKS_PER_YEAR;
+    const yearlyCost = weeklyCost * WEEKS_PER_YEAR;
+
+    setCalculatedResult({
+      duration,
+      powerKw: kw,
+      rate,
+      usesPerWeek: frequency,
+      kwh: sessionKwh,
+      cost: sessionCost,
+      weeklyKwh,
+      weeklyCost,
+      monthlyKwh,
+      monthlyCost,
+      yearlyKwh,
+      yearlyCost,
+    });
+
+    
+    setIsDirty(false);
+  };
+
+  
+  const savingsOptions = useMemo(() => {
+    if (!calculatedResult) return [];
+
+    const { duration, powerKw: kw, rate, usesPerWeek: frequency, monthlyCost, yearlyCost } = calculatedResult;
+    const options = [];
+
+    const possibleReductions = [0.5, 1, 2];
+    possibleReductions.forEach((hoursReduced) => {
+      if (hoursReduced < duration) {
+        const savedPerSession = kw * hoursReduced * rate;
+        const monthlySavings = savedPerSession * frequency * WEEKS_PER_MONTH;
+        const yearlySavings = savedPerSession * frequency * WEEKS_PER_YEAR;
+
+        options.push({
+          id: `runtime-${hoursReduced}`,
+          title: `Use ${hoursReduced} hour${hoursReduced === 1 ? '' : 's'} less`,
+          description: `Reduce each session duration by ${hoursReduced} hr.`,
+          monthlySavings,
+          yearlySavings,
+        });
+      }
+    });
+
+    options.push({
+      id: 'efficiency-10',
+      title: 'Reduce usage by 10%',
+      description: 'Switch to Eco mode, lower thermostat, or reduce brightness.',
+      monthlySavings: monthlyCost * 0.1,
+      yearlySavings: yearlyCost * 0.1,
+    });
+
+    return options;
+  }, [calculatedResult]);
+
+ 
+  const energyTips = useMemo(() => {
+    if (!calculatedResult) return [];
+
+    const tips = [];
+    const lowerName = itemName.trim().toLowerCase();
+    const { duration, powerKw: kw, usesPerWeek: frequency, monthlyCost, yearlyCost } = calculatedResult;
+
+    if (monthlyCost >= 10) {
+      tips.push({
+        title: 'High monthly impact',
+        text: `At this pace, ${itemName || 'this device'} adds ~$${monthlyCost.toFixed(2)}/mo ($${yearlyCost.toFixed(2)}/yr) to your power bill.`,
+      });
+    }
+
+    if (lowerName.includes('ac') || lowerName.includes('air conditioner')) {
+      tips.push({
+        title: 'Optimize AC operation',
+        text: 'Pre-cool during off-peak morning hours and raise thermostat by 2°F to save 6-8% energy.',
+      });
+    } else if (lowerName.includes('heater')) {
+      tips.push({
+        title: 'Space heater warning',
+        text: 'Space heaters draw high continuous power. Use timer outlets to avoid continuous overnight draw.',
+      });
+    } else if (lowerName.includes('dryer') || lowerName.includes('washer')) {
+      tips.push({
+        title: 'Run full loads only',
+        text: 'Running at full capacity cuts the total cycles needed each week.',
+      });
+    }
+
+    if (duration >= 4) {
+      tips.push({
+        title: 'Long operating duration',
+        text: `Runs for ${duration.toFixed(1)} hrs per session. Cutting runtime is the quickest way to reduce cost.`,
+      });
+    }
+
+    if (frequency >= 5) {
+      tips.push({
+        title: 'High weekly frequency',
+        text: `Used ${frequency} times/week. Consolidating uses reduces frequent startup power spikes.`,
+      });
+    }
+
+    return tips.slice(0, 3);
+  }, [calculatedResult, itemName]);
+
+ 
+  const handleSaveSession = async () => {
+    if (!itemName.trim()) {
+      Alert.alert('Missing Name', 'Please enter an appliance name before saving.');
+      return;
+    }
+
+    if (!calculatedResult) {
+      Alert.alert('Calculate First', 'Press Calculate Cost before saving this session.');
+      return;
+    }
+
+    if (isDirty) {
+      Alert.alert('Unsaved Changes', 'Please press Re-calculate Cost before saving.');
+      return;
+    }
+
+    const newItem = {
+      id: Date.now().toString(),
+      name: itemName.trim(),
+      startTime,
+      endTime,
+      powerKw: calculatedResult.powerKw,
+      durationHours: Number(calculatedResult.duration.toFixed(2)),
+      usesPerWeek: calculatedResult.usesPerWeek,
+      ratePerKwh: calculatedResult.rate,
+      kwh: Number(calculatedResult.kwh.toFixed(3)),
+      cost: Number(calculatedResult.cost.toFixed(2)),
+      projectedMonthlyKwh: Number(calculatedResult.monthlyKwh.toFixed(2)),
+      projectedMonthlyCost: Number(calculatedResult.monthlyCost.toFixed(2)),
+      projectedYearlyCost: Number(calculatedResult.yearlyCost.toFixed(2)),
+      createdAt: new Date().toISOString(),
+    };
+
+    const updatedList = [newItem, ...loggedAppliances];
+    const newTotalKwh = updatedList.reduce((sum, item) => sum + Number(item.kwh || 0), 0);
+
+    try {
+      if (userID) {
+        await setDoc(
+          doc(db, 'electricity', userID),
+          {
+            loggedAppliances: updatedList,
+            totalKwh: newTotalKwh,
+            ratePerKwh: calculatedResult.rate,
+          },
+          { merge: true }
+        );
+      }
+
+      setLoggedAppliances(updatedList);
+      setItemName('');
+      Alert.alert('Saved!', 'Appliance session logged to your Electricity Dashboard.');
+    } catch (error) {
+      console.error('Error saving session:', error);
+      Alert.alert('Save Failed', 'Unable to sync with Firestore.');
+    }
+  };
+
+ 
+  const handleDeleteItem = async (id) => {
+    const updatedList = loggedAppliances.filter((item) => item.id !== id);
+    const newTotalKwh = updatedList.reduce((sum, item) => sum + Number(item.kwh || 0), 0);
+
+    setLoggedAppliances(updatedList);
+
+    if (!userID) return;
+    try {
+      await setDoc(
+        doc(db, 'electricity', userID),
+        {
+          loggedAppliances: updatedList,
+          totalKwh: newTotalKwh,
+        },
+        { merge: true }
+      );
+    } catch (error) {
+      console.error('Error deleting session:', error);
+    }
+  };
+
+  
+  const getMonthlyCost = (item) => {
+    if (item.projectedMonthlyCost !== undefined) {
+      return Number(item.projectedMonthlyCost);
+    }
+    const freq = Number(item.usesPerWeek || 1);
+    return Number(item.cost || 0) * freq * WEEKS_PER_MONTH;
+  };
+
+  const monthlyPortfolioCost = loggedAppliances.reduce((sum, item) => sum + getMonthlyCost(item), 0);
+  const monthlyPortfolioKwh = loggedAppliances.reduce(
+    (sum, item) => sum + (Number(item.projectedMonthlyKwh) || Number(item.kwh || 0) * WEEKS_PER_MONTH),
+    0
+  );
+
+  const highestCostItem = [...loggedAppliances].sort((a, b) => getMonthlyCost(b) - getMonthlyCost(a))[0];
+
+  if (loading) {
+    return (
+      <View style={styles.centered}>
+        <ActivityIndicator size="large" color="#F97316" />
+        <Text style={styles.loadingText}>Loading Energy Calculator...</Text>
+      </View>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        {/* HEADER */}
+        <View style={styles.header}>
+          <Text style={styles.eyebrow}>SMART ENERGY</Text>
+          <Text style={styles.headerTitle}>Save on Electricity</Text>
+          <Text style={styles.headerSubtitle}>
+            Calculate running costs, evaluate monthly projections, and discover savings.
+          </Text>
+        </View>
+
+        {/* 1. INPUT CARD */}
+        <View style={styles.card}>
+          <View style={styles.sectionHeader}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.sectionTitle}>Usage Details</Text>
+              <Text style={styles.sectionSubtitle}>Enter one usage session to analyze.</Text>
+            </View>
+            <View style={styles.stepBadge}>
+              <Text style={styles.stepBadgeText}>1</Text>
+            </View>
+          </View>
+
+        
+          <Text style={styles.inputLabel}>Appliance Name</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="e.g. Air Conditioner, Oven, Dishwasher"
+            placeholderTextColor="#94A3B8"
+            value={itemName}
+            onChangeText={handleInputChange(setItemName)}
+          />
+
+         
+          <View style={styles.timeRow}>
+            <View style={styles.flexColumn}>
+              <Text style={styles.inputLabel}>Start Time</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="15:00"
+                placeholderTextColor="#94A3B8"
+                keyboardType="numbers-and-punctuation"
+                maxLength={5}
+                value={startTime}
+                onChangeText={handleInputChange(setStartTime)}
+              />
+            </View>
+
+            <View style={styles.arrowBox}>
+              <Text style={styles.arrowText}>→</Text>
+            </View>
+
+            <View style={styles.flexColumn}>
+              <Text style={styles.inputLabel}>End Time</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="18:00"
+                placeholderTextColor="#94A3B8"
+                keyboardType="numbers-and-punctuation"
+                maxLength={5}
+                value={endTime}
+                onChangeText={handleInputChange(setEndTime)}
+              />
+            </View>
+          </View>
+          <Text style={styles.helperText}>Use 24-hr time (e.g. 15:00 to 18:00 = 3 hours).</Text>
+
+         
+          <View style={styles.inputGrid}>
+            <View style={styles.flexColumn}>
+              <Text style={styles.inputLabel}>Power Rating (kW)</Text>
+              <View style={styles.unitInput}>
+                <TextInput
+                  style={styles.unitField}
+                  placeholder="1.5"
+                  placeholderTextColor="#94A3B8"
+                  keyboardType="decimal-pad"
+                  value={powerKw}
+                  onChangeText={handleInputChange(setPowerKw)}
+                />
+                <Text style={styles.unitLabel}>kW</Text>
+              </View>
+            </View>
+
+            <View style={[styles.flexColumn, { marginLeft: 10 }]}>
+              <Text style={styles.inputLabel}>Electricity Rate</Text>
+              <View style={styles.unitInput}>
+                <Text style={styles.prefix}>$</Text>
+                <TextInput
+                  style={styles.unitField}
+                  placeholder="0.22"
+                  placeholderTextColor="#94A3B8"
+                  keyboardType="decimal-pad"
+                  value={ratePerKwh}
+                  onChangeText={handleInputChange(setRatePerKwh)}
+                />
+                <Text style={styles.smallUnit}>/kWh</Text>
+              </View>
+            </View>
+          </View>
+
+        
+          <Text style={styles.inputLabel}>Uses per week</Text>
+          <View style={styles.frequencyRow}>
+            {['1', '3', '5', '7'].map((num) => {
+              const selected = usesPerWeek === num;
+              return (
+                <TouchableOpacity
+                  key={num}
+                  style={[styles.frequencyButton, selected && styles.frequencyButtonSelected]}
+                  onPress={() => {
+                    setUsesPerWeek(num);
+                    setIsDirty(true);
+                  }}
+                >
+                  <Text style={[styles.frequencyText, selected && styles.frequencyTextSelected]}>
+                    {num}x
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+
+            <TextInput
+              style={styles.customFrequency}
+              keyboardType="decimal-pad"
+              placeholder="Other"
+              placeholderTextColor="#94A3B8"
+              value={['1', '3', '5', '7'].includes(usesPerWeek) ? '' : usesPerWeek}
+              onChangeText={handleInputChange(setUsesPerWeek)}
+            />
+          </View>
+
+          
+          <Button
+            mode="contained"
+            buttonColor={isDirty && calculatedResult ? '#EA580C' : '#0F172A'}
+            textColor="#FFFFFF"
+            icon="calculator"
+            style={styles.calculateButton}
+            contentStyle={styles.calculateButtonContent}
+            labelStyle={styles.calculateButtonLabel}
+            onPress={handleCalculate}
+          >
+            {calculatedResult
+              ? isDirty
+                ? 'Re-calculate Cost ⟳'
+                : 'Recalculate Cost'
+              : 'Calculate Cost'}
+          </Button>
+        </View>
+
+        
+        <View style={styles.costCard}>
+          <View style={styles.costTopRow}>
+            <View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Text style={styles.darkLabel}>COST PER USE</Text>
+                {isDirty && calculatedResult && (
+                  <Text style={styles.dirtyLabel}>• EDITED (Press Re-calculate)</Text>
+                )}
+              </View>
+              <Text style={styles.mainCost}>
+                ${calculatedResult ? calculatedResult.cost.toFixed(2) : '0.00'}
+              </Text>
+            </View>
+            <View style={styles.energyIcon}>
+              <Text style={styles.energyIconText}>⚡</Text>
+            </View>
+          </View>
+
+          <View style={styles.darkDivider} />
+
+          <View style={styles.statRow}>
+            <View style={styles.darkStat}>
+              <Text style={styles.darkStatLabel}>Duration</Text>
+              <Text style={styles.darkStatValue}>
+                {calculatedResult ? `${calculatedResult.duration.toFixed(1)} hr` : '--'}
+              </Text>
+            </View>
+
+            <View style={styles.darkLine} />
+
+            <View style={styles.darkStat}>
+              <Text style={styles.darkStatLabel}>Energy</Text>
+              <Text style={styles.darkStatValue}>
+                {calculatedResult ? `${calculatedResult.kwh.toFixed(2)} kWh` : '--'}
+              </Text>
+            </View>
+
+            <View style={styles.darkLine} />
+
+            <View style={styles.darkStat}>
+              <Text style={styles.darkStatLabel}>Frequency</Text>
+              <Text style={styles.darkStatValue}>
+                {calculatedResult ? `${calculatedResult.usesPerWeek}x/wk` : '--'}
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        
+        <View style={styles.card}>
+          <View style={styles.sectionHeader}>
+            <View>
+              <Text style={styles.sectionTitle}>Cost Projection</Text>
+              <Text style={styles.sectionSubtitle}>Projected costs based on current frequency.</Text>
+            </View>
+          </View>
+
+          <View style={styles.projectionGrid}>
+            <View style={styles.projectionBox}>
+              <Text style={styles.projectionLabel}>WEEK</Text>
+              <Text style={styles.projectionValue}>
+                ${calculatedResult ? calculatedResult.weeklyCost.toFixed(2) : '0.00'}
+              </Text>
+            </View>
+
+            <View style={[styles.projectionBox, styles.highlightProjection]}>
+              <Text style={styles.projectionLabel}>MONTH</Text>
+              <Text style={styles.monthCost}>
+                ${calculatedResult ? calculatedResult.monthlyCost.toFixed(2) : '0.00'}
+              </Text>
+            </View>
+
+            <View style={styles.projectionBox}>
+              <Text style={styles.projectionLabel}>YEAR</Text>
+              <Text style={styles.projectionValue}>
+                ${calculatedResult ? calculatedResult.yearlyCost.toFixed(2) : '0.00'}
+              </Text>
+            </View>
+          </View>
+
+          {calculatedResult && (
+            <View style={styles.projectionNote}>
+              <Text style={styles.projectionNoteText}>
+                At this rate, this device will consume approximately{' '}
+                <Text style={styles.boldText}>{calculatedResult.monthlyKwh.toFixed(1)} kWh</Text> per month.
+              </Text>
+            </View>
+          )}
+        </View>
+
+        
+        <View style={styles.card}>
+          <View style={styles.sectionHeader}>
+            <View>
+              <Text style={styles.sectionTitle}>What If You Used Less?</Text>
+              <Text style={styles.sectionSubtitle}>See how small changes affect your bill.</Text>
+            </View>
+            <View style={styles.savingsBadge}>
+              <Text style={styles.savingsBadgeText}>SAVE</Text>
+            </View>
+          </View>
+
+          {!calculatedResult ? (
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyTitle}>Calculate your usage first</Text>
+              <Text style={styles.emptyText}>Enter appliance details and press Calculate Cost.</Text>
+            </View>
+          ) : (
+            savingsOptions.map((option) => (
+              <View key={option.id} style={styles.savingsRow}>
+                <View style={styles.savingsTextBlock}>
+                  <Text style={styles.savingsTitle}>{option.title}</Text>
+                  <Text style={styles.savingsDescription}>{option.description}</Text>
+                </View>
+                <View style={styles.savingsAmount}>
+                  <Text style={styles.savingsDollar}>+${option.monthlySavings.toFixed(2)}</Text>
+                  <Text style={styles.savingsPerMonth}>/ month</Text>
+                </View>
+              </View>
+            ))
+          )}
+        </View>
+
+       
+        <View style={styles.aiCard}>
+          <View style={styles.aiHeader}>
+            <View style={styles.aiIconBox}>
+              <Text style={styles.aiIcon}>✦</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.aiTitle}>Energy Coach</Text>
+              <Text style={styles.aiSubtitle}>Personalized ways to lower this cost.</Text>
+            </View>
+            <View style={styles.aiBadge}>
+              <Text style={styles.aiBadgeText}>AI</Text>
+            </View>
+          </View>
+
+          {!calculatedResult ? (
+            <View style={styles.aiEmpty}>
+              <Text style={styles.emptyTitle}>Ready when you are</Text>
+              <Text style={styles.emptyText}>Press Calculate Cost above to generate efficiency insights.</Text>
+            </View>
+          ) : (
+            <View style={styles.tipList}>
+              {energyTips.map((tip, index) => (
+                <View key={index} style={styles.tipRow}>
+                  <View style={styles.tipNumber}>
+                    <Text style={styles.tipNumberText}>{index + 1}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.tipTitle}>{tip.title}</Text>
+                    <Text style={styles.tipText}>{tip.text}</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          )}
+        </View>
+
+        
+        <Button
+          mode="contained"
+          buttonColor="#F97316"
+          textColor="#FFFFFF"
+          icon="plus-circle-outline"
+          style={styles.saveButton}
+          contentStyle={styles.saveButtonContent}
+          labelStyle={styles.saveButtonLabel}
+          onPress={handleSaveSession}
+        >
+          Save Appliance to Dashboard
+        </Button>
+
+       
+        {loggedAppliances.length > 0 && (
+          <View style={styles.outlookCard}>
+            <Text style={styles.outlookEyebrow}>MONTHLY OUTLOOK (PORTFOLIO)</Text>
+            <View style={styles.outlookMainRow}>
+              <View>
+                <Text style={styles.outlookCost}>${monthlyPortfolioCost.toFixed(2)}</Text>
+                <Text style={styles.outlookCaption}>projected monthly cost</Text>
+              </View>
+              <View style={styles.outlookRight}>
+                <Text style={styles.outlookKwh}>{monthlyPortfolioKwh.toFixed(1)} kWh</Text>
+                <Text style={styles.outlookCaption}>monthly consumption</Text>
+              </View>
+            </View>
+
+            {highestCostItem && (
+              <View style={styles.biggestCostBox}>
+                <Text style={styles.biggestCostLabel}>Highest Consumer</Text>
+                <Text style={styles.biggestCostName}>{highestCostItem.name}</Text>
+                <Text style={styles.biggestCostValue}>
+                  ~${getMonthlyCost(highestCostItem).toFixed(2)}/month
+                </Text>
+              </View>
+            )}
+          </View>
+        )}
+
+        
+        <View style={styles.historySection}>
+          <View style={styles.historyHeader}>
+            <View>
+              <Text style={styles.historyTitle}>Saved Devices</Text>
+              <Text style={styles.historySubtitle}>Tracked appliance usage list.</Text>
+            </View>
+            <View style={styles.countBadge}>
+              <Text style={styles.countText}>{loggedAppliances.length}</Text>
+            </View>
+          </View>
+
+          {loggedAppliances.length === 0 ? (
+            <View style={styles.emptyHistory}>
+              <Text style={styles.emptyHistoryIcon}>⚡</Text>
+              <Text style={styles.emptyTitle}>Nothing saved yet</Text>
+              <Text style={styles.emptyText}>Calculate and save devices to track them here.</Text>
+            </View>
+          ) : (
+            loggedAppliances.map((item) => {
+              const oldPowerKw = Number(item.powerKw ?? (Number(item.watts || 0) / 1000));
+              const oldDuration = Number(item.durationHours ?? item.hours ?? 0);
+              const frequency = Number(item.usesPerWeek || 1);
+              const monthlyCost = getMonthlyCost(item);
+
+              return (
+                <View key={item.id} style={styles.historyCard}>
+                  <View style={styles.historyTopRow}>
+                    <View style={styles.deviceInfo}>
+                      <View style={styles.deviceIcon}>
+                        <Text>⚡</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.deviceName} numberOfLines={1}>
+                          {item.name}
+                        </Text>
+                        <Text style={styles.deviceTime}>
+                          {item.startTime && item.endTime
+                            ? `${item.startTime} → ${item.endTime}`
+                            : `${oldDuration.toFixed(1)} hr`}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <TouchableOpacity
+                      style={styles.deleteButton}
+                      onPress={() => handleDeleteItem(item.id)}
+                    >
+                      <Text style={styles.deleteText}>×</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <View style={styles.deviceStats}>
+                    <View style={styles.deviceStat}>
+                      <Text style={styles.deviceStatLabel}>Power</Text>
+                      <Text style={styles.deviceStatValue}>{oldPowerKw.toFixed(2)} kW</Text>
+                    </View>
+
+                    <View style={styles.deviceStat}>
+                      <Text style={styles.deviceStatLabel}>Uses</Text>
+                      <Text style={styles.deviceStatValue}>{frequency}x/wk</Text>
+                    </View>
+
+                    <View style={styles.deviceStat}>
+                      <Text style={styles.deviceStatLabel}>Per use</Text>
+                      <Text style={styles.deviceStatValue}>
+                        ${Number(item.cost || 0).toFixed(2)}
+                      </Text>
+                    </View>
+
+                    <View style={styles.monthStat}>
+                      <Text style={styles.deviceStatLabel}>Month</Text>
+                      <Text style={styles.monthStatValue}>${monthlyCost.toFixed(2)}</Text>
+                    </View>
+                  </View>
+                </View>
+              );
+            })
+          )}
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+};
+
+export default ElectricScreen;
+
+// =========================================================
+// STYLES
+// =========================================================
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#F8FAFC' },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#F8FAFC' },
+  loadingText: { marginTop: 12, color: '#64748B', fontSize: 13 },
+  scrollContent: { paddingHorizontal: 18, paddingTop: 14, paddingBottom: 40 },
+  header: { marginBottom: 20 },
+  eyebrow: { fontSize: 10, fontWeight: '800', letterSpacing: 1.4, color: '#F97316', marginBottom: 5 },
+  headerTitle: { fontSize: 28, fontWeight: '800', color: '#0F172A', letterSpacing: -0.7 },
+  headerSubtitle: { marginTop: 7, fontSize: 12.5, lineHeight: 19, color: '#64748B' },
+  card: { backgroundColor: '#FFFFFF', borderRadius: 18, borderWidth: 1, borderColor: '#E2E8F0', padding: 16, marginBottom: 14 },
+  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 17 },
+  sectionTitle: { fontSize: 16, fontWeight: '700', color: '#0F172A' },
+  sectionSubtitle: { fontSize: 10.5, color: '#94A3B8', marginTop: 3 },
+  stepBadge: { width: 31, height: 31, borderRadius: 10, backgroundColor: '#FFF7ED', alignItems: 'center', justifyContent: 'center' },
+  stepBadgeText: { fontSize: 11, color: '#EA580C', fontWeight: '800' },
+  inputLabel: { fontSize: 11, color: '#475569', fontWeight: '700', marginBottom: 6 },
+  input: { height: 47, borderRadius: 11, borderWidth: 1, borderColor: '#E2E8F0', backgroundColor: '#F8FAFC', paddingHorizontal: 13, color: '#0F172A', fontSize: 14, marginBottom: 14 },
+  flexColumn: { flex: 1 },
+  timeRow: { flexDirection: 'row', alignItems: 'center' },
+  arrowBox: { width: 34, alignItems: 'center', paddingTop: 8 },
+  arrowText: { fontSize: 17, color: '#94A3B8' },
+  helperText: { fontSize: 9.5, color: '#94A3B8', marginTop: -5, marginBottom: 16 },
+  inputGrid: { flexDirection: 'row', marginBottom: 16 },
+  unitInput: { height: 47, flexDirection: 'row', alignItems: 'center', borderRadius: 11, borderWidth: 1, borderColor: '#E2E8F0', backgroundColor: '#F8FAFC', paddingHorizontal: 12 },
+  unitField: { flex: 1, fontSize: 14, color: '#0F172A', paddingVertical: 0 },
+  unitLabel: { fontSize: 11, fontWeight: '700', color: '#64748B' },
+  smallUnit: { fontSize: 9, color: '#64748B', fontWeight: '600' },
+  prefix: { fontSize: 13, color: '#64748B', marginRight: 2 },
+  frequencyRow: { flexDirection: 'row', gap: 7 },
+  frequencyButton: { flex: 1, minHeight: 42, backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  frequencyButtonSelected: { backgroundColor: '#FFF7ED', borderColor: '#FB923C' },
+  frequencyText: { color: '#64748B', fontSize: 11, fontWeight: '700' },
+  frequencyTextSelected: { color: '#EA580C' },
+  customFrequency: { flex: 1.2, minHeight: 42, borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, backgroundColor: '#F8FAFC', textAlign: 'center', color: '#0F172A', fontSize: 11 },
+  calculateButton: { borderRadius: 13, marginTop: 18 },
+  calculateButtonContent: { minHeight: 50 },
+  calculateButtonLabel: { fontSize: 12, fontWeight: '700' },
+  costCard: { backgroundColor: '#0F172A', borderRadius: 19, padding: 18, marginBottom: 14 },
+  costTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  darkLabel: { color: '#94A3B8', fontSize: 9.5, fontWeight: '800', letterSpacing: 1 },
+  dirtyLabel: { fontSize: 9, color: '#F97316', fontWeight: '800' },
+  mainCost: { fontSize: 38, fontWeight: '800', color: '#FFFFFF', marginTop: 2, letterSpacing: -1 },
+  energyIcon: { width: 47, height: 47, borderRadius: 15, backgroundColor: '#1E293B', alignItems: 'center', justifyContent: 'center' },
+  energyIconText: { fontSize: 21 },
+  darkDivider: { height: 1, backgroundColor: '#334155', marginVertical: 15 },
+  statRow: { flexDirection: 'row' },
+  darkStat: { flex: 1 },
+  darkStatLabel: { fontSize: 9, color: '#64748B', marginBottom: 4 },
+  darkStatValue: { fontSize: 12, color: '#FFFFFF', fontWeight: '700' },
+  darkLine: { width: 1, backgroundColor: '#334155', marginHorizontal: 10 },
+  projectionGrid: { flexDirection: 'row', gap: 8 },
+  projectionBox: { flex: 1, backgroundColor: '#F8FAFC', borderRadius: 12, paddingVertical: 13, paddingHorizontal: 8, alignItems: 'center' },
+  highlightProjection: { backgroundColor: '#FFF7ED' },
+  projectionLabel: { fontSize: 8.5, color: '#94A3B8', fontWeight: '800', marginBottom: 5 },
+  projectionValue: { fontSize: 14, fontWeight: '800', color: '#334155' },
+  monthCost: { fontSize: 16, fontWeight: '800', color: '#EA580C' },
+  projectionNote: { backgroundColor: '#F8FAFC', borderRadius: 10, marginTop: 11, padding: 10 },
+  projectionNoteText: { color: '#64748B', fontSize: 10, lineHeight: 15 },
+  boldText: { color: '#334155', fontWeight: '700' },
+  savingsBadge: { backgroundColor: '#ECFDF5', paddingVertical: 5, paddingHorizontal: 8, borderRadius: 8 },
+  savingsBadgeText: { color: '#059669', fontSize: 8.5, fontWeight: '800' },
+  savingsRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, borderTopWidth: 1, borderTopColor: '#F1F5F9' },
+  savingsTextBlock: { flex: 1, marginRight: 12 },
+  savingsTitle: { fontSize: 11.5, fontWeight: '700', color: '#334155' },
+  savingsDescription: { fontSize: 9.5, color: '#94A3B8', lineHeight: 14, marginTop: 2 },
+  savingsAmount: { alignItems: 'flex-end' },
+  savingsDollar: { color: '#059669', fontWeight: '800', fontSize: 14 },
+  savingsPerMonth: { color: '#94A3B8', fontSize: 8.5 },
+  aiCard: { backgroundColor: '#FFFFFF', borderRadius: 18, borderWidth: 1, borderColor: '#E2E8F0', padding: 16, marginBottom: 14 },
+  aiHeader: { flexDirection: 'row', alignItems: 'center' },
+  aiIconBox: { width: 39, height: 39, borderRadius: 12, backgroundColor: '#FFF7ED', alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+  aiIcon: { fontSize: 19, color: '#EA580C' },
+  aiTitle: { fontSize: 15, fontWeight: '700', color: '#0F172A' },
+  aiSubtitle: { fontSize: 10, color: '#94A3B8', marginTop: 2 },
+  aiBadge: { backgroundColor: '#F1F5F9', borderRadius: 8, paddingVertical: 5, paddingHorizontal: 9 },
+  aiBadgeText: { fontSize: 9, color: '#475569', fontWeight: '800' },
+  aiEmpty: { backgroundColor: '#F8FAFC', borderRadius: 12, padding: 14, marginTop: 14 },
+  tipList: { marginTop: 12 },
+  tipRow: { flexDirection: 'row', paddingVertical: 10, borderTopWidth: 1, borderTopColor: '#F1F5F9' },
+  tipNumber: { width: 26, height: 26, borderRadius: 8, backgroundColor: '#FFF7ED', alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+  tipNumberText: { color: '#EA580C', fontSize: 10, fontWeight: '800' },
+  tipTitle: { fontSize: 11.5, fontWeight: '700', color: '#334155' },
+  tipText: { fontSize: 10, lineHeight: 15, color: '#64748B', marginTop: 2 },
+  emptyBox: { backgroundColor: '#F8FAFC', padding: 14, borderRadius: 12 },
+  emptyTitle: { fontSize: 11, fontWeight: '700', color: '#475569', textAlign: 'center' },
+  emptyText: { fontSize: 9.5, lineHeight: 14, color: '#94A3B8', textAlign: 'center', marginTop: 3 },
+  saveButton: { borderRadius: 13, marginBottom: 18 },
+  saveButtonContent: { minHeight: 50 },
+  saveButtonLabel: { fontSize: 12, fontWeight: '700' },
+  outlookCard: { backgroundColor: '#0F766E', borderRadius: 18, padding: 17, marginBottom: 22 },
+  outlookEyebrow: { color: '#99F6E4', fontSize: 9, fontWeight: '800', letterSpacing: 1, marginBottom: 8 },
+  outlookMainRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  outlookCost: { fontSize: 28, fontWeight: '800', color: '#FFFFFF' },
+  outlookRight: { alignItems: 'flex-end' },
+  outlookKwh: { fontSize: 18, fontWeight: '700', color: '#FFFFFF' },
+  outlookCaption: { fontSize: 9, color: '#CCFBF1', marginTop: 2 },
+  biggestCostBox: { marginTop: 15, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#0D9488' },
+  biggestCostLabel: { color: '#99F6E4', fontSize: 8.5 },
+  biggestCostName: { color: '#FFFFFF', fontSize: 12, fontWeight: '700', marginTop: 3 },
+  biggestCostValue: { color: '#CCFBF1', fontSize: 10, marginTop: 2 },
+  historySection: { marginTop: 2 },
+  historyHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  historyTitle: { fontSize: 16, fontWeight: '700', color: '#0F172A' },
+  historySubtitle: { fontSize: 10, color: '#94A3B8', marginTop: 2 },
+  countBadge: { width: 31, height: 31, backgroundColor: '#E2E8F0', borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  countText: { fontSize: 11, fontWeight: '700', color: '#475569' },
+  emptyHistory: { backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 1, borderColor: '#E2E8F0', padding: 24, alignItems: 'center' },
+  emptyHistoryIcon: { fontSize: 23, marginBottom: 7 },
+  historyCard: { backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 1, borderColor: '#E2E8F0', padding: 14, marginBottom: 9 },
+  historyTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  deviceInfo: { flex: 1, flexDirection: 'row', alignItems: 'center' },
+  deviceIcon: { width: 35, height: 35, borderRadius: 11, backgroundColor: '#FFF7ED', alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+  deviceName: { fontSize: 12.5, fontWeight: '700', color: '#1E293B' },
+  deviceTime: { fontSize: 9.5, color: '#94A3B8', marginTop: 2 },
+  deleteButton: { width: 32, height: 32, borderRadius: 10, backgroundColor: '#FEF2F2', alignItems: 'center', justifyContent: 'center', marginLeft: 10 },
+  deleteText: { fontSize: 19, color: '#EF4444' },
+  deviceStats: { flexDirection: 'row', borderTopWidth: 1, borderTopColor: '#F1F5F9', marginTop: 12, paddingTop: 11 },
+  deviceStat: { flex: 1 },
+  monthStat: { flex: 1, alignItems: 'flex-end' },
+  deviceStatLabel: { fontSize: 8.5, color: '#94A3B8', marginBottom: 3 },
+  deviceStatValue: { fontSize: 10, fontWeight: '600', color: '#475569' },
+  monthStatValue: { fontSize: 11, fontWeight: '800', color: '#0F766E' },
+});
