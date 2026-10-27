@@ -1,23 +1,60 @@
-import React, { useState } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, ScrollView, TextInput, Modal } from 'react-native';
+import React, { useState, useCallback } from 'react';
+import { StyleSheet, View, Text, TouchableOpacity, ScrollView, TextInput, Modal, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { db, auth } from '../firebase';
 
-const EmergencyKitScreen = ({ navigation, route }) => {
-  const [items, setItems] = useState(
-    route.params?.emergencyKit || [
-      { id: '1', name: 'Food', checked: false },
-      { id: '2', name: 'First aid Kit', checked: false },
-      { id: '3', name: 'Water', checked: false },
-      { id: '4', name: 'flashlight', checked: false },
-      { id: '5', name: 'radio', checked: false },
-      { id: '6', name: 'batteries', checked: false },
-    ]
-  );
-
+const EmergencyKitScreen = ({ navigation }) => {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [modalVisible, setModalVisible] = useState(false);
   const [newItemName, setNewItemName] = useState('');
 
-  // Local state update only
+  
+  const readEmergencyKit = async () => {
+    const userID = auth.currentUser?.uid;
+    if (!userID) {
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const docRef = doc(db, "emergencies", userID);
+      const docSnap = await getDoc(docRef);
+
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        console.log("Emergency Kit loaded from Firestore:", data.emergencyKit);
+        setItems(data.emergencyKit || []);
+      } else {
+       
+        const defaultKit = [
+          { id: '1', name: 'Food', checked: false },
+          { id: '2', name: 'First aid Kit', checked: false },
+          { id: '3', name: 'Water', checked: false },
+          { id: '4', name: 'flashlight', checked: false },
+          { id: '5', name: 'radio', checked: false },
+          { id: '6', name: 'batteries', checked: false },
+        ];
+        setItems(defaultKit);
+
+        await setDoc(docRef, { emergencyKit: defaultKit }, { merge: true });
+      }
+    } catch (e) {
+      console.error("Error reading emergency kit: ", e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  
+  useFocusEffect(
+    useCallback(() => {
+      readEmergencyKit();
+    }, [])
+  );
+
   const toggleCheckbox = (id) => {
     setItems((prevItems) =>
       prevItems.map((item) =>
@@ -42,14 +79,37 @@ const EmergencyKitScreen = ({ navigation, route }) => {
     setItems((prevItems) => prevItems.filter((item) => item.id !== id));
   };
 
-  // Sync data back to main screen on exit
-  const handleSaveAndExit = () => {
+  
+  const handleSaveAndExit = async () => {
+    const userID = auth.currentUser?.uid;
+    if (userID) {
+      try {
+        await setDoc(
+          doc(db, 'emergencies', userID),
+          { emergencyKit: items },
+          { merge: true }
+        );
+        console.log("Emergency Kit successfully updated in Firestore!");
+      } catch (error) {
+        console.error('Error saving emergency kit: ', error);
+      }
+    }
+
     navigation.navigate({
       name: 'Emergency Center',
       params: { updatedKit: items },
       merge: true,
     });
   };
+
+  if (loading) {
+    return (
+      <View style={styles.centered}>
+        <ActivityIndicator size="large" color="#FF4500" />
+        <Text style={{ marginTop: 10, color: '#666' }}>Loading Emergency Kit...</Text>
+      </View>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container}>
@@ -60,7 +120,6 @@ const EmergencyKitScreen = ({ navigation, route }) => {
           <View style={styles.titleUnderline} />
         </View>
 
-        {/* Checkbox List */}
         <View style={styles.listContainer}>
           {items.map((item) => (
             <View key={item.id} style={styles.itemRow}>
@@ -80,7 +139,6 @@ const EmergencyKitScreen = ({ navigation, route }) => {
           ))}
         </View>
 
-        {/* Action Buttons */}
         <TouchableOpacity
           activeOpacity={0.8}
           style={styles.addButton}
@@ -99,7 +157,6 @@ const EmergencyKitScreen = ({ navigation, route }) => {
 
       </ScrollView>
 
-      {/* Modal */}
       <Modal
         animationType="fade"
         transparent={true}
@@ -145,6 +202,7 @@ export default EmergencyKitScreen;
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#EAEAEA' },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   scrollContent: { paddingHorizontal: 20, paddingVertical: 16, alignItems: 'center' },
   headerContainer: { alignItems: 'center', marginBottom: 24, width: '100%' },
   headerTitle: { fontSize: 24, color: '#4A4A4A', textAlign: 'center' },
